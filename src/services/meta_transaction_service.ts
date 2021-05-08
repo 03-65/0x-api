@@ -1,5 +1,4 @@
-import { QuoteReport, Signature } from '@0x/asset-swapper';
-import { ContractAddresses } from '@0x/contract-addresses';
+import { ContractAddresses, QuoteReport, Signature } from '@0x/asset-swapper';
 import { ContractTxFunctionObj, ContractWrappers } from '@0x/contract-wrappers';
 import {
     assetDataUtils,
@@ -10,6 +9,7 @@ import {
     SupportedProvider,
 } from '@0x/order-utils';
 import { PartialTxParams } from '@0x/subproviders';
+import { getTokenMetadataIfExists } from '@0x/token-metadata';
 import { ExchangeProxyMetaTransaction, Order, SignedOrder } from '@0x/types';
 import { BigNumber, RevertError } from '@0x/utils';
 import * as _ from 'lodash';
@@ -50,7 +50,6 @@ import {
 import { ethGasStationUtils } from '../utils/gas_station_utils';
 import { quoteReportUtils } from '../utils/quote_report_utils';
 import { serviceUtils } from '../utils/service_utils';
-import { getTokenMetadataIfExists } from '../utils/token_metadata_utils';
 import { utils } from '../utils/utils';
 
 const WETHToken = getTokenMetadataIfExists('WETH', CHAIN_ID)!;
@@ -156,6 +155,7 @@ export class MetaTransactionService {
                 sellTokenAddress: params.sellTokenAddress,
                 buyAmount: params.buyAmount,
                 sellAmount: params.sellAmount,
+                apiKey: params.apiKey,
             });
         }
         return {
@@ -392,7 +392,7 @@ export class MetaTransactionService {
         const transformations: Transformation[] = decoded.functionArguments.transformations;
 
         const fillQuoteTransformations = transformations.filter(
-            t => t.deploymentNonce.toString() === this._fillQuoteTransformerDeploymentNonce.toString(),
+            (t) => t.deploymentNonce.toString() === this._fillQuoteTransformerDeploymentNonce.toString(),
         );
 
         if (fillQuoteTransformations.length === 0) {
@@ -433,10 +433,7 @@ export class MetaTransactionService {
 }
 
 function normalizeGasPrice(gasPrice: BigNumber): BigNumber {
-    return gasPrice
-        .div(ONE_GWEI)
-        .integerValue(BigNumber.ROUND_UP)
-        .times(ONE_GWEI);
+    return gasPrice.div(ONE_GWEI).integerValue(BigNumber.ROUND_UP).times(ONE_GWEI);
 }
 
 function createExpirationTime(): BigNumber {
@@ -445,7 +442,7 @@ function createExpirationTime(): BigNumber {
 
 function calculateProtocolFeeRequiredForOrders(gasPrice: BigNumber, orders: (SignedOrder | Order)[]): BigNumber {
     const nativeOrderCount = orders.filter(
-        o => !assetDataUtils.isERC20BridgeAssetData(assetDataUtils.decodeAssetDataOrThrow(o.makerAssetData)),
+        (o) => !assetDataUtils.isERC20BridgeAssetData(assetDataUtils.decodeAssetDataOrThrow(o.makerAssetData)),
     ).length;
     return gasPrice.times(nativeOrderCount).times(PROTOCOL_FEE_MULTIPLIER);
 }

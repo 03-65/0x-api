@@ -1,14 +1,16 @@
 import {
     AffiliateFeeAmount,
     AffiliateFeeType,
-    AltRfqtMakerAssetOfferings,
+    AltRfqMakerAssetOfferings,
     artifacts,
     AssetSwapperContractAddresses,
+    BlockParamLiteral,
+    ContractAddresses,
     ERC20BridgeSource,
     FakeTakerContract,
-    GetMarketOrdersRfqtOpts,
+    GetMarketOrdersRfqOpts,
     Orderbook,
-    RfqtFirmQuoteValidator,
+    RfqFirmQuoteValidator,
     SwapQuote,
     SwapQuoteConsumer,
     SwapQuoteGetOutputOpts,
@@ -16,9 +18,10 @@ import {
     SwapQuoteRequestOpts,
     SwapQuoterOpts,
 } from '@0x/asset-swapper';
-import { ContractAddresses } from '@0x/contract-addresses';
+import { NATIVE_FEE_TOKEN_BY_CHAIN_ID } from '@0x/asset-swapper/lib/src/utils/market_operation_utils/constants';
 import { WETH9Contract } from '@0x/contract-wrappers';
 import { ETH_TOKEN_ADDRESS, RevertError } from '@0x/protocol-utils';
+import { getTokenMetadataIfExists, TokenMetadatasForChains } from '@0x/token-metadata';
 import { MarketOperation, PaginatedCollection } from '@0x/types';
 import { BigNumber, decodeThrownErrorAsRevertError } from '@0x/utils';
 import { TxData, Web3Wrapper } from '@0x/web3-wrapper';
@@ -30,6 +33,7 @@ import {
     ALT_RFQ_MM_API_KEY,
     ALT_RFQ_MM_ENDPOINT,
     ASSET_SWAPPER_MARKET_ORDERS_OPTS,
+    ASSET_SWAPPER_MARKET_ORDERS_OPTS_NO_MULTIPLEX,
     ASSET_SWAPPER_MARKET_ORDERS_OPTS_NO_VIP,
     CHAIN_ID,
     RFQT_REQUEST_MAX_RESPONSE_MS,
@@ -50,9 +54,8 @@ import {
     WRAP_QUOTE_GAS,
     ZERO,
 } from '../constants';
-import { InsufficientFundsError } from '../errors';
+import { GasEstimationError, InsufficientFundsError } from '../errors';
 import { logger } from '../logger';
-import { TokenMetadatasForChains } from '../token_metadatas_for_networks';
 import {
     AffiliateFee,
     BucketedPriceDepth,
@@ -70,7 +73,6 @@ import { marketDepthUtils } from '../utils/market_depth_utils';
 import { paginationUtils } from '../utils/pagination_utils';
 import { createResultCache } from '../utils/result_cache';
 import { serviceUtils } from '../utils/service_utils';
-import { getTokenMetadataIfExists } from '../utils/token_metadata_utils';
 import { utils } from '../utils/utils';
 
 export class SwapService {
@@ -81,7 +83,7 @@ export class SwapService {
     private readonly _web3Wrapper: Web3Wrapper;
     private readonly _wethContract: WETH9Contract;
     private readonly _contractAddresses: ContractAddresses;
-    private readonly _firmQuoteValidator: RfqtFirmQuoteValidator | undefined;
+    private readonly _firmQuoteValidator: RfqFirmQuoteValidator | undefined;
     private _altRfqMarketsCache: any;
 
     private static _getSwapQuotePrice(
@@ -134,7 +136,7 @@ export class SwapService {
         orderbook: Orderbook,
         provider: SupportedProvider,
         contractAddresses: AssetSwapperContractAddresses,
-        firmQuoteValidator?: RfqtFirmQuoteValidator | undefined,
+        firmQuoteValidator?: RfqFirmQuoteValidator | undefined,
     ) {
         this._provider = provider;
         this._firmQuoteValidator = firmQuoteValidator;
@@ -158,8 +160,16 @@ export class SwapService {
             },
             contractAddresses,
         };
+        if (CHAIN_ID === ChainId.Ganache) {
+            swapQuoterOpts.samplerOverrides = {
+                block: BlockParamLiteral.Latest,
+                overrides: {},
+                to: contractAddresses.erc20BridgeSampler,
+                ...(swapQuoterOpts.samplerOverrides || {}),
+            };
+        }
         this._swapQuoter = new SwapQuoter(this._provider, orderbook, swapQuoterOpts);
-        this._swapQuoteConsumer = new SwapQuoteConsumer(this._provider, swapQuoterOpts);
+        this._swapQuoteConsumer = new SwapQuoteConsumer(swapQuoterOpts);
         this._web3Wrapper = new Web3Wrapper(this._provider);
 
         this._contractAddresses = contractAddresses;
@@ -192,7 +202,7 @@ export class SwapService {
             shouldSellEntireBalance,
         } = params;
 
-        let _rfqt: GetMarketOrdersRfqtOpts | undefined;
+        let _rfqt: GetMarketOrdersRfqOpts | undefined;
         // Only enable RFQT if there's an API key and either (a) it's a
         // forwarder transaction (isETHSell===true), (b) there's a taker
         // address present, or (c) it's an indicative quote.
@@ -200,7 +210,7 @@ export class SwapService {
             apiKey !== undefined && (isETHSell || takerAddress !== undefined || (rfqt && rfqt.isIndicative));
         if (shouldEnableRfqt) {
             // tslint:disable-next-line:custom-no-magic-numbers
-            const altRfqtAssetOfferings = await this._getAltMarketOfferingsAsync(1500);
+            const altRfqAssetOfferings = await this._getAltMarketOfferingsAsync(1500);
 
             _rfqt = {
                 ...rfqt,
@@ -211,19 +221,26 @@ export class SwapService {
                 takerAddress: NULL_ADDRESS,
                 txOrigin: takerAddress!,
                 firmQuoteValidator: this._firmQuoteValidator,
-                altRfqtAssetOfferings,
+                altRfqAssetOfferings,
             };
         }
 
         // only generate quote reports for rfqt firm quotes or when price comparison is requested
         const shouldGenerateQuoteReport = includePriceComparisons || (rfqt && rfqt.intentOnFilling);
 
-        const swapQuoteRequestOpts: Partial<SwapQuoteRequestOpts> =
+        let swapQuoteRequestOpts: Partial<SwapQuoteRequestOpts>;
+        if (
             isMetaTransaction ||
+            shouldSellEntireBalance ||
             // Note: We allow VIP to continue ahead when positive slippage fee is enabled
             affiliateFee.feeType === AffiliateFeeType.PercentageFee
-                ? ASSET_SWAPPER_MARKET_ORDERS_OPTS_NO_VIP
-                : ASSET_SWAPPER_MARKET_ORDERS_OPTS;
+        ) {
+            swapQuoteRequestOpts = ASSET_SWAPPER_MARKET_ORDERS_OPTS_NO_VIP;
+        } else if (isETHBuy || isETHSell) {
+            swapQuoteRequestOpts = ASSET_SWAPPER_MARKET_ORDERS_OPTS_NO_MULTIPLEX;
+        } else {
+            swapQuoteRequestOpts = ASSET_SWAPPER_MARKET_ORDERS_OPTS;
+        }
 
         const assetSwapperOpts: Partial<SwapQuoteRequestOpts> = {
             ...swapQuoteRequestOpts,
@@ -289,7 +306,7 @@ export class SwapService {
         // using eth_gasEstimate
         // If an error occurs we attempt to provide a better message then "Transaction Reverted"
         if (takerAddress && !skipValidation) {
-            const estimateGasCallResult = await this._estimateGasOrThrowRevertErrorAsync({
+            let estimateGasCallResult = await this._estimateGasOrThrowRevertErrorAsync({
                 to,
                 data,
                 from: takerAddress,
@@ -297,7 +314,7 @@ export class SwapService {
                 gasPrice,
             });
             // Add any underterministic gas overhead the encoded transaction has detected
-            estimateGasCallResult.plus(gasOverhead);
+            estimateGasCallResult = estimateGasCallResult.plus(gasOverhead);
             // Take the max of the faux estimate or the real estimate
             conservativeBestCaseGasEstimate = BigNumber.max(
                 // Add a little buffer to eth_estimateGas as it is not always correct
@@ -306,7 +323,7 @@ export class SwapService {
             );
         }
         // If any sources can be undeterministic in gas costs, we add a buffer
-        const hasUndeterministicFills = _.flatten(swapQuote.orders.map(order => order.fills)).some(fill =>
+        const hasUndeterministicFills = _.flatten(swapQuote.orders.map((order) => order.fills)).some((fill) =>
             [ERC20BridgeSource.Native, ERC20BridgeSource.MultiBridge].includes(fill.source),
         );
         const undeterministicMultiplier = hasUndeterministicFills ? GAS_LIMIT_BUFFER_MULTIPLIER : 1;
@@ -368,11 +385,11 @@ export class SwapService {
     }
 
     public async getSwapQuoteForWrapAsync(params: GetSwapQuoteParams): Promise<GetSwapQuoteResponse> {
-        return this._getSwapQuoteForWethAsync(params, false);
+        return this._getSwapQuoteForNativeWrappedAsync(params, false);
     }
 
     public async getSwapQuoteForUnwrapAsync(params: GetSwapQuoteParams): Promise<GetSwapQuoteResponse> {
-        return this._getSwapQuoteForWethAsync(params, true);
+        return this._getSwapQuoteForNativeWrappedAsync(params, true);
     }
 
     public async getTokenPricesAsync(
@@ -385,17 +402,17 @@ export class SwapService {
         // returns price in sellToken units, e.g What is the price of 1 ZRX (in DAI)
         // Equivalent to performing multiple swap quotes selling sellToken and buying 1 whole buy token
         const takerToken = sellToken.tokenAddress;
-        const queryTokenData = TokenMetadatasForChains.filter(m => m.symbol !== sellToken.symbol).filter(
-            m => m.tokenAddresses[CHAIN_ID] !== NULL_ADDRESS,
+        const queryTokenData = TokenMetadatasForChains.filter((m) => m.symbol !== sellToken.symbol).filter(
+            (m) => m.tokenAddresses[CHAIN_ID] !== NULL_ADDRESS,
         );
         const paginatedTokens = paginationUtils.paginate(queryTokenData, page, perPage);
         const chunkSize = 20;
         const queryTokenChunks = _.chunk(paginatedTokens.records, chunkSize);
         const allResults = (
             await Promise.all(
-                queryTokenChunks.map(async tokens => {
-                    const makerTokens = tokens.map(t => t.tokenAddresses[CHAIN_ID]);
-                    const amounts = tokens.map(t => Web3Wrapper.toBaseUnitAmount(unitAmount, t.decimals));
+                queryTokenChunks.map(async (tokens) => {
+                    const makerTokens = tokens.map((t) => t.tokenAddresses[CHAIN_ID]);
+                    const amounts = tokens.map((t) => Web3Wrapper.toBaseUnitAmount(unitAmount, t.decimals));
                     const quotes = await this._swapQuoter.getBatchMarketBuySwapQuoteAsync(
                         makerTokens,
                         takerToken,
@@ -411,14 +428,15 @@ export class SwapService {
                 }),
             )
         )
-            .filter(x => x !== undefined)
+            .filter((x) => x !== undefined)
             .reduce((acc, x) => acc.concat(x), []); // flatten
 
         const prices = allResults
             .map((quote, i) => {
                 const buyTokenDecimals = new BigNumber(quote.makerTokenDecimals).toNumber();
                 const sellTokenDecimals = new BigNumber(quote.takerTokenDecimals).toNumber();
-                const symbol = queryTokenData.find(data => data.tokenAddresses[CHAIN_ID] === quote.makerToken)?.symbol;
+                const symbol = queryTokenData.find((data) => data.tokenAddresses[CHAIN_ID] === quote.makerToken)
+                    ?.symbol;
                 const { makerAmount, totalTakerAmount } = quote.bestCaseQuoteInfo;
                 const unitMakerAmount = Web3Wrapper.toUnitAmount(makerAmount, buyTokenDecimals);
                 const unitTakerAmount = Web3Wrapper.toUnitAmount(totalTakerAmount, sellTokenDecimals);
@@ -430,7 +448,7 @@ export class SwapService {
                     price,
                 };
             })
-            .filter(p => p) as Price[];
+            .filter((p) => p) as Price[];
 
         // Add ETH into the prices list as it is not a token
         const wethData = prices.find((p: Price) => p.symbol === 'WETH');
@@ -476,7 +494,7 @@ export class SwapService {
 
         const maxEndSlippagePercentage = 20;
         const scalePriceByDecimals = (priceDepth: BucketedPriceDepth[]) =>
-            priceDepth.map(b => ({
+            priceDepth.map((b) => ({
                 ...b,
                 price: b.price.times(
                     new BigNumber(10).pow(marketDepth.takerTokenDecimals - marketDepth.makerTokenDecimals),
@@ -518,7 +536,7 @@ export class SwapService {
         };
     }
 
-    private async _getSwapQuoteForWethAsync(
+    private async _getSwapQuoteForNativeWrappedAsync(
         params: GetSwapQuoteParams,
         isUnwrap: boolean,
     ): Promise<GetSwapQuoteResponse> {
@@ -547,7 +565,7 @@ export class SwapService {
         const apiSwapQuote: GetSwapQuoteResponse = {
             price: ONE,
             guaranteedPrice: ONE,
-            to: this._wethContract.address,
+            to: NATIVE_FEE_TOKEN_BY_CHAIN_ID[CHAIN_ID],
             data: attributedCalldata.affiliatedData,
             decodedUniqueId: attributedCalldata.decodedUniqueId,
             value,
@@ -582,11 +600,19 @@ export class SwapService {
         try {
             // NOTE: Ganache does not support overrides
             if (CHAIN_ID === ChainId.Ganache) {
-                const gas = await this._web3Wrapper.estimateGasAsync(txData).catch(_e => DEFAULT_VALIDATION_GAS_LIMIT);
+                // Default to true as ganache provides us less info and we cannot override
+                callResult.success = true;
+                const gas = await this._web3Wrapper.estimateGasAsync(txData).catch((_e) => {
+                    // If an estimate error happens on ganache we say it failed
+                    callResult.success = false;
+                    return DEFAULT_VALIDATION_GAS_LIMIT;
+                });
                 callResultGanacheRaw = await this._web3Wrapper.callAsync({
                     ...txData,
                     gas,
                 });
+                callResult.resultData = callResultGanacheRaw;
+                callResult.gasUsed = new BigNumber(gas);
                 gasEstimate = new BigNumber(gas);
             } else {
                 // Split out the `to` and `data` so it doesn't override
@@ -604,8 +630,6 @@ export class SwapService {
                         },
                     },
                 });
-
-                gasEstimate = callResult.gasUsed.plus(utils.calculateCallDataGas(data!));
             }
         } catch (e) {
             if (e.message && /insufficient funds/.test(e.message)) {
@@ -622,7 +646,11 @@ export class SwapService {
                     throw new Error(e.message);
                 }
             } else {
-                revertError = decodeThrownErrorAsRevertError(e);
+                try {
+                    revertError = decodeThrownErrorAsRevertError(e);
+                } catch (e) {
+                    // Could not decode the revert error
+                }
             }
             if (revertError) {
                 throw revertError;
@@ -639,6 +667,13 @@ export class SwapService {
         }
         if (revertError) {
             throw revertError;
+        }
+        // Add in the overhead of call data
+        gasEstimate = callResult.gasUsed.plus(utils.calculateCallDataGas(txData.data!));
+        // If there's a revert and we still are unable to decode it, just throw it.
+        // This can happen in VIPs where there are no real revert reasons
+        if (!callResult.success) {
+            throw new GasEstimationError();
         }
         return gasEstimate;
     }
@@ -673,9 +708,9 @@ export class SwapService {
         };
     }
 
-    private async _getAltMarketOfferingsAsync(timeoutMs: number): Promise<AltRfqtMakerAssetOfferings> {
+    private async _getAltMarketOfferingsAsync(timeoutMs: number): Promise<AltRfqMakerAssetOfferings> {
         if (!this._altRfqMarketsCache) {
-            this._altRfqMarketsCache = createResultCache<AltRfqtMakerAssetOfferings>(async () => {
+            this._altRfqMarketsCache = createResultCache<AltRfqMakerAssetOfferings>(async () => {
                 if (ALT_RFQ_MM_ENDPOINT === undefined || ALT_RFQ_MM_API_KEY === undefined) {
                     return {};
                 }
