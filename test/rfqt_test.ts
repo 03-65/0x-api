@@ -12,10 +12,9 @@ import { ContractAddresses } from '@0x/contract-addresses';
 import { WETH9Contract } from '@0x/contract-wrappers';
 import { DummyERC20TokenContract } from '@0x/contracts-erc20';
 import { expect } from '@0x/contracts-test-utils';
-import { BlockchainLifecycle } from '@0x/dev-utils';
+import { BlockchainLifecycle, Web3Wrapper } from '@0x/dev-utils';
 import { Web3ProviderEngine } from '@0x/subproviders';
 import { BigNumber } from '@0x/utils';
-import { Web3Wrapper } from '@0x/web3-wrapper';
 import Axios from 'axios';
 import { Agent as HttpAgent, Server } from 'http';
 import * as HttpStatus from 'http-status-codes';
@@ -61,7 +60,7 @@ let dependencies: AppDependencies;
 const MAX_UINT256 = new BigNumber(2).pow(256).minus(1);
 const SUITE_NAME = 'rfqt tests';
 
-const EXCLUDED_SOURCES = Object.values(ERC20BridgeSource).filter(s => s !== ERC20BridgeSource.Native);
+const EXCLUDED_SOURCES = Object.values(ERC20BridgeSource).filter((s) => s !== ERC20BridgeSource.Native);
 const DEFAULT_SELL_AMOUNT = new BigNumber(100000000000000000);
 const DEFAULT_QUERY = `buyToken=ZRX&sellToken=WETH&excludedSources=${EXCLUDED_SOURCES.join(',')}&gasPrice=1`;
 

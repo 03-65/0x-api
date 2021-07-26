@@ -1,9 +1,8 @@
 import { ErrorBody, GeneralErrorCodes, generalErrorCodeToReason, ValidationErrorCodes } from '@0x/api-utils';
 import { LimitOrder } from '@0x/asset-swapper';
 import { expect } from '@0x/contracts-test-utils';
-import { BlockchainLifecycle, Web3ProviderEngine } from '@0x/dev-utils';
+import { BlockchainLifecycle, Web3ProviderEngine, Web3Wrapper } from '@0x/dev-utils';
 import { BigNumber } from '@0x/utils';
-import { Web3Wrapper } from '@0x/web3-wrapper';
 import { Server } from 'http';
 import * as HttpStatus from 'http-status-codes';
 import * as _ from 'lodash';
@@ -316,14 +315,14 @@ describe(SUITE_NAME, () => {
                 reason: 'Validation Failed',
                 validationErrors: [
                     {
-                        field: 'instance.quoteToken', // FIXME (xianny): bug in jsonschemas module
-                        code: 1001,
-                        reason: 'does not match pattern "^0x[0-9a-fA-F]{40}$"',
-                    },
-                    {
                         field: 'baseToken',
                         code: 1000,
-                        reason: 'requires property "baseToken"',
+                        reason: "should have required property 'baseToken'",
+                    },
+                    {
+                        field: 'quoteToken',
+                        code: 1001,
+                        reason: 'should match pattern "^0x[0-9a-fA-F]{40}$"',
                     },
                 ],
             };
@@ -372,12 +371,12 @@ describe(SUITE_NAME, () => {
                     {
                         field: 'taker',
                         code: ValidationErrorCodes.RequiredField,
-                        reason: 'requires property "taker"',
+                        reason: "should have required property 'taker'",
                     },
                     {
                         field: 'expiry',
                         code: ValidationErrorCodes.RequiredField,
-                        reason: 'requires property "expiry"',
+                        reason: "should have required property 'expiry'",
                     },
                 ],
             };

@@ -2,7 +2,8 @@ import {
     DEFAULT_GAS_SCHEDULE,
     ERC20BridgeSource,
     FeeSchedule,
-    QuoteReport,
+    PriceComparisonsReport,
+    SELL_SOURCE_FILTER_BY_CHAIN_ID,
     UniswapV2FillData,
 } from '@0x/asset-swapper';
 import { getTokenMetadataIfExists } from '@0x/token-metadata';
@@ -11,7 +12,8 @@ import { BigNumber } from '@0x/utils';
 import { Web3Wrapper } from '@0x/web3-wrapper';
 import * as _ from 'lodash';
 
-import { ZERO } from '../constants';
+import { CHAIN_ID } from '../config';
+import { GAS_LIMIT_BUFFER_MULTIPLIER, TX_BASE_GAS, ZERO } from '../constants';
 import { logger } from '../logger';
 import { ChainId, SourceComparison } from '../types';
 
@@ -39,15 +41,20 @@ const gasScheduleWithOverrides: FeeSchedule = {
     },
 };
 
-const NULL_SOURCE_COMPARISONS = Object.values(ERC20BridgeSource).reduce<SourceComparison[]>((memo, liquiditySource) => {
-    memo.push({
-        name: liquiditySource,
-        price: null,
-        gas: null,
-    });
-
-    return memo;
-}, []);
+const NULL_SOURCE_COMPARISONS = SELL_SOURCE_FILTER_BY_CHAIN_ID[CHAIN_ID].sources.reduce<SourceComparison[]>(
+    (memo, liquiditySource) => {
+        memo.push({
+            name: liquiditySource,
+            price: null,
+            gas: null,
+            savingsInEth: null,
+            buyAmount: null,
+            sellAmount: null,
+        });
+        return memo;
+    },
+    [],
+);
 
 export const priceComparisonUtils = {
     getPriceComparisonFromQuote(
@@ -79,7 +86,7 @@ interface PartialQuote {
     buyTokenToEthRate: BigNumber;
     gasPrice: BigNumber;
     estimatedGas: BigNumber;
-    quoteReport?: QuoteReport;
+    priceComparisonsReport?: PriceComparisonsReport;
 }
 
 function getPriceComparisonFromQuoteOrThrow(
@@ -92,14 +99,22 @@ function getPriceComparisonFromQuoteOrThrow(
     const sellToken = getTokenMetadataIfExists(quote.sellTokenAddress, chainId);
     const ethToken = getTokenMetadataIfExists('WETH', chainId)!;
     const ethUnitAmount = new BigNumber(10).pow(ethToken.decimals);
-    if (!buyToken || !sellToken || !quote.buyAmount || !quote.sellAmount || !quote.quoteReport) {
+    if (!buyToken || !sellToken || !quote.buyAmount || !quote.sellAmount || !quote.priceComparisonsReport) {
+        logger.warn('Missing data to generate price comparisons');
         return undefined;
     }
     const isSelling = side === MarketOperation.Sell;
     const quoteTokenToEthRate = isSelling ? quote.buyTokenToEthRate : quote.sellTokenToEthRate;
 
+    const { priceComparisonsReport } = quote;
     // Filter out samples with invalid amounts
-    const fullTradeSources = quote.quoteReport.sourcesConsidered.filter((s) =>
+
+    const allSources = [
+        ...priceComparisonsReport.dexSources,
+        ...priceComparisonsReport.multiHopSources,
+        ...priceComparisonsReport.nativeSources,
+    ];
+    const fullTradeSources = allSources.filter((s) =>
         isSelling
             ? s.takerAmount.isEqualTo(quote.sellAmount!) && s.makerAmount.isGreaterThan(ZERO)
             : s.makerAmount.isEqualTo(quote.buyAmount!) && s.takerAmount.isGreaterThan(ZERO),
@@ -107,7 +122,7 @@ function getPriceComparisonFromQuoteOrThrow(
 
     // Calculate the maker/taker amounts after factoring in gas costs
     const tradeSourcesWithGas = fullTradeSources.map((source) => {
-        const gas = new BigNumber(gasScheduleWithOverrides[source.liquiditySource]!(source.fillData));
+        const gas = TX_BASE_GAS.plus(new BigNumber(gasScheduleWithOverrides[source.liquiditySource]!(source.fillData)));
 
         const gasCost = gas.times(quote.gasPrice).dividedBy(ethUnitAmount).times(quoteTokenToEthRate);
         const unitMakerAmount = Web3Wrapper.toUnitAmount(source.makerAmount, buyToken.decimals);
@@ -142,6 +157,7 @@ function getPriceComparisonFromQuoteOrThrow(
 
     // Calculate savings (Part 1): Cost of the quote including gas
     const quoteGasCostInTokens = quote.estimatedGas
+        .dividedBy(GAS_LIMIT_BUFFER_MULTIPLIER) // Remove gas estimate safety buffer that we added to the quote
         .times(quote.gasPrice)
         .dividedBy(ethUnitAmount)
         .times(quoteTokenToEthRate);
@@ -173,6 +189,8 @@ function getPriceComparisonFromQuoteOrThrow(
         return {
             name: liquiditySource,
             price,
+            sellAmount: source.takerAmount,
+            buyAmount: source.makerAmount,
             gas,
             savingsInEth,
         };

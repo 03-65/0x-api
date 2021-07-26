@@ -13,7 +13,7 @@ import {
     SwapQuoterOpts,
     SwapQuoterRfqOpts,
 } from '@0x/asset-swapper';
-import { TokenMetadatasForChains } from '@0x/token-metadata';
+import { nativeWrappedTokenSymbol, TokenMetadatasForChains } from '@0x/token-metadata';
 import { BigNumber } from '@0x/utils';
 import * as _ from 'lodash';
 import * as validateUUID from 'uuid-validate';
@@ -60,77 +60,50 @@ enum EnvVarType {
     JsonStringList,
 }
 
-export interface ApiKeyStructure {
-    [key: string]: {
-        label: string;
-        rfqt: boolean;
-        rfqm: boolean;
-        plp: boolean;
-    };
+/**
+ * A taker-integrator of the 0x API.
+ */
+export interface Integrator {
+    apiKeys: string[];
+    integratorId: string;
+    label: string;
+    plp: boolean;
+    rfqm: boolean;
+    rfqt: boolean;
 }
+export type IntegratorsAcl = Integrator[];
 
-export const getApiKeyWhitelistWithFallback = (
-    legacyEnvKey: string,
-    newEnvKey: string,
-    groupType: 'rfqt' | 'plp' | 'rfqm',
-): string[] => {
-    // Try the new path first
-    if (_.isEmpty(process.env[newEnvKey])) {
-        return _.isEmpty(process.env[legacyEnvKey])
-            ? []
-            : assertEnvVarType(legacyEnvKey, process.env[legacyEnvKey], EnvVarType.JsonStringList);
-    }
-
-    let deserialized: ApiKeyStructure;
+/**
+ * Configuration which represents taker-integrators of the 0x API. The configuration contains the label, id,
+ * api keys, and allowed liquidity sources for each integrator.
+ */
+export const INTEGRATORS_ACL: IntegratorsAcl = (() => {
+    let integrators: IntegratorsAcl;
     try {
-        deserialized = JSON.parse(process.env[newEnvKey]!);
-        schemaUtils.validateSchema(deserialized, schemas.apiKeySchema as any);
+        integrators = JSON.parse(process.env.INTEGRATORS_ACL || '[]');
+        schemaUtils.validateSchema(integrators, schemas.integratorsAclSchema);
     } catch (e) {
-        throw new Error(`Key ${newEnvKey} was defined but is not valid JSON`);
+        throw new Error(`INTEGRATORS_ACL was defined but is not valid JSON per the schema: ${e}`);
     }
+    return integrators;
+})();
 
-    const result: string[] = [];
-    for (const apiKey of Object.keys(deserialized)) {
-        const keyMeta = deserialized[apiKey];
-        switch (groupType) {
-            case 'plp':
-                if (keyMeta.plp) {
-                    result.push(apiKey);
-                }
-                break;
-            case 'rfqm':
-                if (keyMeta.rfqm) {
-                    result.push(apiKey);
-                }
-                break;
-            case 'rfqt':
-                if (keyMeta.rfqt) {
-                    result.push(apiKey);
-                }
-                break;
-            default:
-                throw new Error(`Unknown group type inputted: ${groupType}`);
-        }
-    }
-    return result.sort();
+/**
+ * Extracts the integrator API keys from the `INTEGRATORS_ACL` environment variable for the provided group type.
+ */
+export const getApiKeyWhitelistFromIntegratorsAcl = (groupType: 'rfqt' | 'plp' | 'rfqm'): string[] => {
+    return INTEGRATORS_ACL.filter((i) => i[groupType])
+        .flatMap((i) => i.apiKeys)
+        .sort();
 };
 
-export const getApiKeyFromLabel = (label: string): string | undefined => {
-    if (process.env.API_KEYS_ACL === undefined) {
-        return undefined;
-    }
-    let deserialized: ApiKeyStructure;
-    try {
-        deserialized = JSON.parse(process.env.API_KEYS_ACL);
-        schemaUtils.validateSchema(deserialized, schemas.apiKeySchema as any);
-    } catch (e) {
-        throw new Error(`API_KEYS_ACL was defined but is not valid JSON`);
-    }
-
-    for (const apiKey of Object.keys(deserialized)) {
-        const keyMeta = deserialized[apiKey];
-        if (keyMeta.label === label) {
-            return apiKey;
+/**
+ * Gets the integrator ID for the provided label.
+ */
+export const getIntegratorIdFromLabel = (label: string): string | undefined => {
+    for (const integrator of INTEGRATORS_ACL) {
+        if (integrator.label === label) {
+            return integrator.integratorId;
         }
     }
 };
@@ -269,17 +242,12 @@ export const RFQT_REGISTRY_PASSWORDS: string[] = _.isEmpty(process.env.RFQT_REGI
     ? []
     : assertEnvVarType('RFQT_REGISTRY_PASSWORDS', process.env.RFQT_REGISTRY_PASSWORDS, EnvVarType.JsonStringList);
 
-export const RFQT_API_KEY_WHITELIST: string[] = getApiKeyWhitelistWithFallback(
-    'RFQT_API_KEY_WHITELIST_JSON',
-    'API_KEYS_ACL',
-    'rfqt',
-);
+export const RFQT_INTEGRATOR_IDS: string[] = INTEGRATORS_ACL.filter((i) => i.rfqt).map((i) => i.integratorId);
+export const RFQT_API_KEY_WHITELIST: string[] = getApiKeyWhitelistFromIntegratorsAcl('rfqt');
+export const RFQM_API_KEY_WHITELIST: Set<string> = new Set(getApiKeyWhitelistFromIntegratorsAcl('rfqm'));
+export const PLP_API_KEY_WHITELIST: string[] = getApiKeyWhitelistFromIntegratorsAcl('plp');
 
-export const RFQM_API_KEY_WHITELIST: Set<string> = new Set(
-    getApiKeyWhitelistWithFallback('RFQM_API_KEY_WHITELIST_JSON', 'API_KEYS_ACL', 'rfqm'),
-);
-
-export const MATCHA_KEY: string | undefined = getApiKeyFromLabel('Matcha');
+export const MATCHA_INTEGRATOR_ID: string | undefined = getIntegratorIdFromLabel('Matcha');
 
 export const RFQT_TX_ORIGIN_BLACKLIST: Set<string> = _.isEmpty(process.env.RFQT_TX_ORIGIN_BLACKLIST)
     ? new Set()
@@ -301,12 +269,6 @@ export const ALT_RFQ_MM_PROFILE: string | undefined = _.isEmpty(process.env.ALT_
     ? undefined
     : assertEnvVarType('ALT_RFQ_MM_PROFILE', process.env.ALT_RFQ_MM_PROFILE, EnvVarType.NonEmptyString);
 
-export const PLP_API_KEY_WHITELIST: string[] = getApiKeyWhitelistWithFallback(
-    'PLP_API_KEY_WHITELIST_JSON',
-    'API_KEYS_ACL',
-    'plp',
-);
-
 export const RFQT_MAKER_ASSET_OFFERINGS: RfqMakerAssetOfferings = _.isEmpty(process.env.RFQT_MAKER_ASSET_OFFERINGS)
     ? {}
     : assertEnvVarType(
@@ -326,6 +288,25 @@ export const RFQM_MAKER_ASSET_OFFERINGS: RfqMakerAssetOfferings = _.isEmpty(proc
 export const META_TX_WORKER_REGISTRY: string | undefined = _.isEmpty(process.env.META_TX_WORKER_REGISTRY)
     ? undefined
     : assertEnvVarType('META_TX_WORKER_REGISTRY', process.env.META_TX_WORKER_REGISTRY, EnvVarType.ETHAddressHex);
+
+export const META_TX_WORKER_MNEMONIC: string | undefined = _.isEmpty(process.env.META_TX_WORKER_MNEMONIC)
+    ? undefined
+    : assertEnvVarType('META_TX_WORKER_MNEMONIC', process.env.META_TX_WORKER_MNEMONIC, EnvVarType.NonEmptyString);
+
+export const RFQM_WORKER_INDEX: number | undefined = _.isEmpty(process.env.RFQM_WORKER_INDEX)
+    ? undefined
+    : assertEnvVarType('RFQM_WORKER_INDEX', process.env.RFQM_WORKER_INDEX, EnvVarType.Integer);
+
+export const RFQM_META_TX_SQS_URL: string | undefined = _.isEmpty(process.env.RFQM_META_TX_SQS_URL)
+    ? undefined
+    : assertEnvVarType('RFQM_META_TX_SQS_URL', process.env.RFQM_META_TX_SQS_URL, EnvVarType.Url);
+
+// If set to TRUE, system health will change to MAINTENANCE and integrators will be told to not
+// send RFQM orders.
+// tslint:disable-next-line boolean-naming
+export const RFQM_MAINTENANCE_MODE: boolean = _.isEmpty(process.env.RFQM_MAINTENANCE_MODE)
+    ? false
+    : assertEnvVarType('RFQM_MAINTENANCE_MODE', process.env.RFQM_MAINTENANCE_MODE, EnvVarType.Boolean);
 
 // tslint:disable-next-line:boolean-naming
 export const RFQT_REQUEST_MAX_RESPONSE_MS = 600;
@@ -424,7 +405,21 @@ const EXCLUDED_SOURCES = (() => {
             return allERC20BridgeSources.filter(
                 (s) => s !== ERC20BridgeSource.Native && s !== ERC20BridgeSource.UniswapV2,
             );
+        case ChainId.Ropsten:
+            const supportedRopstenSources = new Set([
+                ERC20BridgeSource.Kyber,
+                ERC20BridgeSource.Native,
+                ERC20BridgeSource.SushiSwap,
+                ERC20BridgeSource.Uniswap,
+                ERC20BridgeSource.UniswapV2,
+                ERC20BridgeSource.UniswapV3,
+                ERC20BridgeSource.Curve,
+                ERC20BridgeSource.Mooniswap,
+            ]);
+            return allERC20BridgeSources.filter((s) => !supportedRopstenSources.has(s));
         case ChainId.BSC:
+            return [ERC20BridgeSource.MultiBridge, ERC20BridgeSource.Native];
+        case ChainId.Polygon:
             return [ERC20BridgeSource.MultiBridge, ERC20BridgeSource.Native];
         default:
             return allERC20BridgeSources.filter((s) => s !== ERC20BridgeSource.Native);
@@ -437,17 +432,40 @@ const EXCLUDED_FEE_SOURCES = (() => {
             return [];
         case ChainId.Kovan:
             return [ERC20BridgeSource.Uniswap];
+        case ChainId.Ropsten:
+            return [];
         case ChainId.BSC:
             return [ERC20BridgeSource.Uniswap];
+        case ChainId.Polygon:
+            return [];
         default:
             return [ERC20BridgeSource.Uniswap, ERC20BridgeSource.UniswapV2];
     }
 })();
 const FILL_QUOTE_TRANSFORMER_GAS_OVERHEAD = new BigNumber(150e3);
 const EXCHANGE_PROXY_OVERHEAD_NO_VIP = () => FILL_QUOTE_TRANSFORMER_GAS_OVERHEAD;
-const EXCHANGE_PROXY_OVERHEAD_NO_MULTIPLEX = (sourceFlags: number) => {
-    if ([SOURCE_FLAGS.Uniswap_V2, SOURCE_FLAGS.SushiSwap].includes(sourceFlags)) {
+const EXCHANGE_PROXY_OVERHEAD_NO_MULTIPLEX = (sourceFlags: bigint) => {
+    if ([SOURCE_FLAGS.Uniswap_V2, SOURCE_FLAGS.SushiSwap].includes(sourceFlags) && CHAIN_ID === ChainId.Mainnet) {
+        // Uniswap and forks VIP
         return TX_BASE_GAS;
+    } else if (
+        [
+            SOURCE_FLAGS.SushiSwap,
+            SOURCE_FLAGS.PancakeSwap,
+            SOURCE_FLAGS.PancakeSwap_V2,
+            SOURCE_FLAGS.BakerySwap,
+            SOURCE_FLAGS.ApeSwap,
+            SOURCE_FLAGS.CafeSwap,
+            SOURCE_FLAGS.CheeseSwap,
+            SOURCE_FLAGS.JulSwap,
+        ].includes(sourceFlags) &&
+        CHAIN_ID === ChainId.BSC
+    ) {
+        // PancakeSwap and forks VIP
+        return TX_BASE_GAS;
+    } else if (SOURCE_FLAGS.Uniswap_V3 === sourceFlags) {
+        // Uniswap V3 VIP
+        return TX_BASE_GAS.plus(5e3);
     } else if (SOURCE_FLAGS.Curve === sourceFlags) {
         // Curve pseudo-VIP
         return TX_BASE_GAS.plus(40e3);
@@ -461,15 +479,28 @@ const MULTIPLEX_BATCH_FILL_SOURCE_FLAGS =
     SOURCE_FLAGS.Uniswap_V2 | SOURCE_FLAGS.SushiSwap | SOURCE_FLAGS.LiquidityProvider | SOURCE_FLAGS.RfqOrder;
 const MULTIPLEX_MULTIHOP_FILL_SOURCE_FLAGS =
     SOURCE_FLAGS.Uniswap_V2 | SOURCE_FLAGS.SushiSwap | SOURCE_FLAGS.LiquidityProvider;
-const EXCHANGE_PROXY_OVERHEAD_FULLY_FEATURED = (sourceFlags: number) => {
+const EXCHANGE_PROXY_OVERHEAD_FULLY_FEATURED = (sourceFlags: bigint) => {
     if ([SOURCE_FLAGS.Uniswap_V2, SOURCE_FLAGS.SushiSwap].includes(sourceFlags)) {
-        // Uniswap VIP
+        // Uniswap and forks VIP
         return TX_BASE_GAS;
     } else if (
-        [SOURCE_FLAGS.SushiSwap, SOURCE_FLAGS.PancakeSwap, SOURCE_FLAGS.BakerySwap].includes(sourceFlags) &&
+        [
+            SOURCE_FLAGS.SushiSwap,
+            SOURCE_FLAGS.PancakeSwap,
+            SOURCE_FLAGS.PancakeSwap_V2,
+            SOURCE_FLAGS.BakerySwap,
+            SOURCE_FLAGS.ApeSwap,
+            SOURCE_FLAGS.CafeSwap,
+            SOURCE_FLAGS.CheeseSwap,
+            SOURCE_FLAGS.JulSwap,
+        ].includes(sourceFlags) &&
         CHAIN_ID === ChainId.BSC
     ) {
+        // PancakeSwap and forks VIP
         return TX_BASE_GAS;
+    } else if (SOURCE_FLAGS.Uniswap_V3 === sourceFlags) {
+        // Uniswap V3 VIP
+        return TX_BASE_GAS.plus(5e3);
     } else if (SOURCE_FLAGS.Curve === sourceFlags) {
         // Curve pseudo-VIP
         return TX_BASE_GAS.plus(40e3);
@@ -490,14 +521,7 @@ const EXCHANGE_PROXY_OVERHEAD_FULLY_FEATURED = (sourceFlags: number) => {
     }
 };
 
-export const NATIVE_WRAPPED_TOKEN_SYMBOL = (() => {
-    switch (CHAIN_ID) {
-        case ChainId.BSC:
-            return 'WBNB';
-        default:
-            return 'WETH';
-    }
-})();
+export const NATIVE_WRAPPED_TOKEN_SYMBOL = nativeWrappedTokenSymbol(CHAIN_ID);
 
 export const ASSET_SWAPPER_MARKET_ORDERS_OPTS: Partial<SwapQuoteRequestOpts> = {
     excludedSources: EXCLUDED_SOURCES,
@@ -576,6 +600,33 @@ export const defaultHttpServiceWithRateLimiterConfig: HttpServiceConfig = {
     ...defaultHttpServiceConfig,
     metaTxnRateLimiters: META_TXN_RATE_LIMITER_CONFIG,
 };
+
+/**
+ * Gets the integrator ID for a given API key. If the API key is not in the configuration, returns `undefined`.
+ * `integratorsMap` is closed in so it only needs to be evaluated once. Much efficiency!
+ */
+export const getIntegratorIdForApiKey = (
+    (integratorsMap: Map<string, Integrator>) =>
+    (apiKey: string): string | undefined => {
+        const integrator = integratorsMap.get(apiKey);
+        return integrator ? integrator.integratorId : undefined;
+    }
+)(transformIntegratorsAcl(INTEGRATORS_ACL));
+
+/**
+ * Utility function to transform INTEGRATORS_ACL into a map of apiKey => integrator. The result can
+ * be used to optimize the lookup of the integrator when a request comes in with an api key. Lookup complexity
+ * becomes O(1) with the map instead of O(# integrators * # api keys) with the array.
+ */
+function transformIntegratorsAcl(integrators: IntegratorsAcl): Map<string, Integrator> {
+    const result = new Map<string, Integrator>();
+    integrators.forEach((integrator) => {
+        integrator.apiKeys.forEach((apiKey) => {
+            result.set(apiKey, integrator);
+        });
+    });
+    return result;
+}
 
 function assertEnvVarType(name: string, value: any, expectedType: EnvVarType): any {
     let returnValue;

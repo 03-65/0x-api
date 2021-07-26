@@ -48,6 +48,7 @@ export const ONE_GWEI = new BigNumber(1000000000);
 
 // RFQM Service
 export const KEEP_ALIVE_TTL = ONE_MINUTE_MS * 5;
+export const RFQM_TRANSACTION_WATCHER_SLEEP_TIME_MS = ONE_SECOND_MS * 15;
 
 // API namespaces
 export const SRA_PATH = '/sra/v4';
@@ -94,7 +95,13 @@ export const NUMBER_SOURCES_PER_LOG_LINE = 12;
 // RFQ Quote Validator expiration threshold
 export const RFQ_FIRM_QUOTE_CACHE_EXPIRY = ONE_MINUTE_MS * 2;
 export const RFQ_ALLOWANCE_TARGET = '0xdef1c0ded9bec7f1a1670819833240f027b25eff';
-export const RFQM_MINUMUM_EXPIRY_DURATION_MS = ONE_MINUTE_MS * 3;
+export const RFQM_MINIMUM_EXPIRY_DURATION_MS = ONE_MINUTE_MS;
+export const RFQM_TX_GAS_ESTIMATE = 165e3;
+export const RFQ_DYNAMIC_BLACKLIST_TTL = ONE_SECOND_MS * 30;
+
+// SQS Client
+export const LONG_POLLING_WAIT_TIME_SECONDS = 20;
+export const SINGLE_MESSAGE = 1;
 
 // General cache control
 export const DEFAULT_CACHE_AGE_SECONDS = 10;

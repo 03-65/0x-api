@@ -72,6 +72,7 @@ import { altMarketResponseToAltOfferings } from '../utils/alt_mm_utils';
 import { marketDepthUtils } from '../utils/market_depth_utils';
 import { paginationUtils } from '../utils/pagination_utils';
 import { createResultCache } from '../utils/result_cache';
+import { RfqDynamicBlacklist } from '../utils/rfq_dyanmic_blacklist';
 import { serviceUtils } from '../utils/service_utils';
 import { utils } from '../utils/utils';
 
@@ -94,10 +95,8 @@ export class SwapService {
         affiliateFee: AffiliateFee,
     ): { price: BigNumber; guaranteedPrice: BigNumber } {
         const { makerAmount, totalTakerAmount } = swapQuote.bestCaseQuoteInfo;
-        const {
-            totalTakerAmount: guaranteedTotalTakerAmount,
-            makerAmount: guaranteedMakerAmount,
-        } = swapQuote.worstCaseQuoteInfo;
+        const { totalTakerAmount: guaranteedTotalTakerAmount, makerAmount: guaranteedMakerAmount } =
+            swapQuote.worstCaseQuoteInfo;
         const unitMakerAmount = Web3Wrapper.toUnitAmount(makerAmount, buyTokenDecimals);
         const unitTakerAmount = Web3Wrapper.toUnitAmount(totalTakerAmount, sellTokenDecimals);
         const guaranteedUnitMakerAmount = Web3Wrapper.toUnitAmount(guaranteedMakerAmount, buyTokenDecimals);
@@ -137,6 +136,7 @@ export class SwapService {
         provider: SupportedProvider,
         contractAddresses: AssetSwapperContractAddresses,
         firmQuoteValidator?: RfqFirmQuoteValidator | undefined,
+        rfqDynamicBlacklist?: RfqDynamicBlacklist,
     ) {
         this._provider = provider;
         this._firmQuoteValidator = firmQuoteValidator;
@@ -160,6 +160,11 @@ export class SwapService {
             },
             contractAddresses,
         };
+
+        if (swapQuoterOpts.rfqt !== undefined && rfqDynamicBlacklist !== undefined) {
+            swapQuoterOpts.rfqt.txOriginBlacklist = rfqDynamicBlacklist;
+        }
+
         if (CHAIN_ID === ChainId.Ganache) {
             swapQuoterOpts.samplerOverrides = {
                 block: BlockParamLiteral.Latest,
@@ -191,7 +196,7 @@ export class SwapService {
             isETHBuy,
             excludedSources,
             includedSources,
-            apiKey,
+            integratorId,
             rfqt,
             affiliateAddress,
             affiliateFee,
@@ -207,7 +212,7 @@ export class SwapService {
         // forwarder transaction (isETHSell===true), (b) there's a taker
         // address present, or (c) it's an indicative quote.
         const shouldEnableRfqt =
-            apiKey !== undefined && (isETHSell || takerAddress !== undefined || (rfqt && rfqt.isIndicative));
+            integratorId !== undefined && (isETHSell || takerAddress !== undefined || (rfqt && rfqt.isIndicative));
         if (shouldEnableRfqt) {
             // tslint:disable-next-line:custom-no-magic-numbers
             const altRfqAssetOfferings = await this._getAltMarketOfferingsAsync(1500);
@@ -215,7 +220,7 @@ export class SwapService {
             _rfqt = {
                 ...rfqt,
                 intentOnFilling: rfqt && rfqt.intentOnFilling ? true : false,
-                apiKey: apiKey!,
+                apiKey: integratorId!, // Send the integrator ID to market makers instead of the raw API key
                 makerEndpointMaxResponseTimeMs: RFQT_REQUEST_MAX_RESPONSE_MS,
                 // Note 0xAPI maps takerAddress query parameter to txOrigin as takerAddress is always Exchange Proxy or a VIP
                 takerAddress: NULL_ADDRESS,
@@ -225,8 +230,8 @@ export class SwapService {
             };
         }
 
-        // only generate quote reports for rfqt firm quotes or when price comparison is requested
-        const shouldGenerateQuoteReport = includePriceComparisons || (rfqt && rfqt.intentOnFilling);
+        // only generate quote reports for rfqt firm quotes
+        const shouldGenerateQuoteReport = rfqt && rfqt.intentOnFilling;
 
         let swapQuoteRequestOpts: Partial<SwapQuoteRequestOpts>;
         if (
@@ -250,6 +255,7 @@ export class SwapService {
             includedSources,
             rfqt: _rfqt,
             shouldGenerateQuoteReport,
+            shouldIncludePriceComparisonsReport: !!includePriceComparisons,
         };
 
         const marketSide = sellAmount !== undefined ? MarketOperation.Sell : MarketOperation.Buy;
@@ -273,7 +279,7 @@ export class SwapService {
             protocolFeeInWeiAmount: bestCaseProtocolFee,
         } = swapQuote.bestCaseQuoteInfo;
         const { protocolFeeInWeiAmount: protocolFee, gas: worstCaseGas } = swapQuote.worstCaseQuoteInfo;
-        const { gasPrice, sourceBreakdown, quoteReport } = swapQuote;
+        const { gasPrice, sourceBreakdown, quoteReport, priceComparisonsReport } = swapQuote;
 
         const {
             gasCost: affiliateFeeGasCost,
@@ -357,6 +363,7 @@ export class SwapService {
             .decimalPlaces(makerTokenDecimals);
 
         const apiSwapQuote: GetSwapQuoteResponse = {
+            chainId: CHAIN_ID,
             price,
             guaranteedPrice,
             to,
@@ -380,6 +387,7 @@ export class SwapService {
             sellTokenToEthRate,
             buyTokenToEthRate,
             quoteReport,
+            priceComparisonsReport,
         };
         return apiSwapQuote;
     }
@@ -435,8 +443,9 @@ export class SwapService {
             .map((quote, i) => {
                 const buyTokenDecimals = new BigNumber(quote.makerTokenDecimals).toNumber();
                 const sellTokenDecimals = new BigNumber(quote.takerTokenDecimals).toNumber();
-                const symbol = queryTokenData.find((data) => data.tokenAddresses[CHAIN_ID] === quote.makerToken)
-                    ?.symbol;
+                const symbol = queryTokenData.find(
+                    (data) => data.tokenAddresses[CHAIN_ID] === quote.makerToken,
+                )?.symbol;
                 const { makerAmount, totalTakerAmount } = quote.bestCaseQuoteInfo;
                 const unitMakerAmount = Web3Wrapper.toUnitAmount(makerAmount, buyTokenDecimals);
                 const unitTakerAmount = Web3Wrapper.toUnitAmount(totalTakerAmount, sellTokenDecimals);
@@ -458,9 +467,7 @@ export class SwapService {
         return { ...paginatedTokens, records: prices };
     }
 
-    public async calculateMarketDepthAsync(
-        params: CalaculateMarketDepthParams,
-    ): Promise<{
+    public async calculateMarketDepthAsync(params: CalaculateMarketDepthParams): Promise<{
         asks: { depth: BucketedPriceDepth[] };
         bids: { depth: BucketedPriceDepth[] };
         buyToken: TokenMetadataOptionalSymbol;
@@ -553,9 +560,8 @@ export class SwapService {
         if (amount === undefined) {
             throw new Error('sellAmount or buyAmount required');
         }
-        const data = (isUnwrap
-            ? this._wethContract.withdraw(amount)
-            : this._wethContract.deposit()
+        const data = (
+            isUnwrap ? this._wethContract.withdraw(amount) : this._wethContract.deposit()
         ).getABIEncodedTransactionData();
         const value = isUnwrap ? ZERO : amount;
         const attributedCalldata = serviceUtils.attributeCallData(data, affiliateAddress);
@@ -563,6 +569,7 @@ export class SwapService {
         const gasPrice = providedGasPrice || (await this._swapQuoter.getGasPriceEstimationOrThrowAsync());
         const gasEstimate = isUnwrap ? UNWRAP_QUOTE_GAS : WRAP_QUOTE_GAS;
         const apiSwapQuote: GetSwapQuoteResponse = {
+            chainId: CHAIN_ID,
             price: ONE,
             guaranteedPrice: ONE,
             to: NATIVE_FEE_TOKEN_BY_CHAIN_ID[CHAIN_ID],

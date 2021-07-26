@@ -2,16 +2,22 @@ import { ConnectionOptions } from 'typeorm';
 
 import { POSTGRES_READ_REPLICA_URIS, POSTGRES_URI } from './config';
 import {
+    BlockedAddressEntity,
     KeyValueEntity,
     MakerBalanceChainCacheEntity,
     PersistentSignedOrderEntity,
     PersistentSignedOrderV4Entity,
+    RfqmJobEntity,
+    RfqmQuoteEntity,
+    RfqmTransactionSubmissionEntity,
+    RfqmWorkerHeartbeatEntity,
     SignedOrderEntity,
     SignedOrderV4Entity,
     TransactionEntity,
 } from './entities';
 
 const entities = [
+    BlockedAddressEntity,
     SignedOrderEntity,
     PersistentSignedOrderEntity,
     TransactionEntity,
@@ -19,6 +25,10 @@ const entities = [
     MakerBalanceChainCacheEntity,
     SignedOrderV4Entity,
     PersistentSignedOrderV4Entity,
+    RfqmWorkerHeartbeatEntity,
+    RfqmQuoteEntity,
+    RfqmJobEntity,
+    RfqmTransactionSubmissionEntity,
 ];
 
 const config: ConnectionOptions = {
@@ -36,7 +46,7 @@ const config: ConnectionOptions = {
         ? {
               replication: {
                   master: { url: POSTGRES_URI },
-                  slaves: POSTGRES_READ_REPLICA_URIS.map(r => ({ url: r })),
+                  slaves: POSTGRES_READ_REPLICA_URIS.map((r) => ({ url: r })),
               },
           }
         : { url: POSTGRES_URI }),

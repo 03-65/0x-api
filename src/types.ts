@@ -4,6 +4,7 @@ import {
     ContractAddresses,
     ERC20BridgeSource,
     LimitOrderFields,
+    PriceComparisonsReport,
     QuoteReport,
     RfqRequestOpts,
     Signature,
@@ -177,6 +178,8 @@ export enum ChainId {
     Kovan = 42,
     Ganache = 1337,
     BSC = 56,
+    Polygon = 137,
+    PolygonMumbai = 80001,
 }
 // tslint:enable:enum-naming
 
@@ -202,6 +205,7 @@ export interface AffiliateFeeAmounts {
 /** Begin /swap and /meta_transaction types */
 
 interface QuoteBase {
+    chainId: ChainId;
     price: BigNumber;
     buyAmount: BigNumber;
     sellAmount: BigNumber;
@@ -234,7 +238,9 @@ export interface SourceComparison {
     name: ERC20BridgeSource | '0x';
     price: BigNumber | null;
     gas: BigNumber | null;
-    savingsInEth?: BigNumber;
+    savingsInEth: BigNumber | null;
+    buyAmount: BigNumber | null;
+    sellAmount: BigNumber | null;
 }
 
 export interface AffiliateFee {
@@ -262,6 +268,7 @@ export interface GetSwapQuoteResponse extends SwapQuoteResponsePartialTransactio
     orders?: any;
     from?: string;
     quoteReport?: QuoteReport;
+    priceComparisonsReport?: PriceComparisonsReport;
 }
 
 export interface SwapQuoteResponsePartialTransaction {
@@ -286,6 +293,8 @@ export interface GetSwapQuoteParams extends SwapQuoteParamsBase {
     isETHSell: boolean;
     isETHBuy: boolean;
     isMetaTransaction: boolean;
+    // The ID of the integrator associated with the provided API key, if there is one.
+    integratorId?: string;
 }
 
 // GET /swap/price
